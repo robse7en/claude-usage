@@ -272,9 +272,25 @@ def load_state() -> dict[str, Any]:
 def save_state(state: dict[str, Any]) -> None:
     path = state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(".tmp")
+    tmp_path = path.with_name(f"{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
     tmp_path.write_text(json.dumps(state, indent=2, sort_keys=True), encoding="utf-8")
-    tmp_path.replace(path)
+
+    for attempt in range(5):
+        try:
+            tmp_path.replace(path)
+            return
+        except PermissionError as exc:
+            if attempt == 4:
+                LOGGER.warning("Could not replace state file %s: %s", path, exc)
+                break
+            time.sleep(0.05 * (attempt + 1))
+
+    try:
+        tmp_path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        LOGGER.debug("Could not remove temporary state file %s: %s", tmp_path, exc)
 
 
 def runtime_state(state: dict[str, Any]) -> dict[str, Any]:

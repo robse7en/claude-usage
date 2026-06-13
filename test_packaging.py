@@ -190,6 +190,49 @@ class NotifierPackagingTests(unittest.TestCase):
             "2026-06-14 02:30",
         )
 
+    def test_save_state_retries_transient_replace_permission_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "ClaudeUsage" / "state.json"
+            original_replace = Path.replace
+            attempts = 0
+
+            def flaky_replace(self: Path, target_path: Path) -> Path:
+                nonlocal attempts
+                attempts += 1
+                if attempts == 1:
+                    raise PermissionError("simulated transient Windows lock")
+                return original_replace(self, target_path)
+
+            with mock.patch("claude_reset_notifier.state_path", return_value=target), mock.patch.object(
+                claude_reset_notifier.time, "sleep", return_value=None
+            ), mock.patch.object(Path, "replace", flaky_replace):
+                claude_reset_notifier.save_state({"runtime": {"status": "running"}})
+
+            self.assertEqual(attempts, 2)
+            self.assertEqual(
+                json.loads(target.read_text(encoding="utf-8")),
+                {"runtime": {"status": "running"}},
+            )
+
+    def test_save_state_does_not_crash_when_replace_remains_locked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "ClaudeUsage" / "state.json"
+            attempts = 0
+
+            def locked_replace(self: Path, target_path: Path) -> Path:
+                nonlocal attempts
+                attempts += 1
+                raise PermissionError("simulated persistent Windows lock")
+
+            with mock.patch("claude_reset_notifier.state_path", return_value=target), mock.patch.object(
+                claude_reset_notifier.time, "sleep", return_value=None
+            ), mock.patch.object(Path, "replace", locked_replace):
+                claude_reset_notifier.save_state({"runtime": {"status": "running"}})
+
+            self.assertGreater(attempts, 1)
+            self.assertFalse(target.exists())
+            self.assertEqual(list(target.parent.glob("*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()
