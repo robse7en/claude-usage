@@ -1,3 +1,4 @@
+import asyncio
 import os
 import tempfile
 import unittest
@@ -189,6 +190,42 @@ class NotifierPackagingTests(unittest.TestCase):
             claude_reset_notifier.format_log_time(value.timestamp()),
             "2026-06-14 02:30",
         )
+
+    def test_poll_api_uses_rate_limit_headers_from_429_response(self) -> None:
+        reset_ts = 1781403600
+        weekly_reset_ts = 1781593200
+
+        def handler(request: claude_reset_notifier.httpx.Request) -> claude_reset_notifier.httpx.Response:
+            return claude_reset_notifier.httpx.Response(
+                429,
+                headers={
+                    "anthropic-ratelimit-unified-5h-utilization": "1.0",
+                    "anthropic-ratelimit-unified-5h-reset": str(reset_ts),
+                    "anthropic-ratelimit-unified-5h-status": "rejected",
+                    "anthropic-ratelimit-unified-7d-utilization": "0.29",
+                    "anthropic-ratelimit-unified-7d-reset": str(weekly_reset_ts),
+                },
+                json={"type": "error", "error": {"type": "rate_limit_error"}},
+                request=request,
+            )
+
+        real_client = claude_reset_notifier.httpx.AsyncClient
+
+        def client_factory(*_args: object, **_kwargs: object) -> claude_reset_notifier.httpx.AsyncClient:
+            return real_client(
+                transport=claude_reset_notifier.httpx.MockTransport(handler)
+            )
+
+        with mock.patch.object(claude_reset_notifier.httpx, "AsyncClient", client_factory):
+            snapshot = asyncio.run(claude_reset_notifier.poll_api("token"))
+
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual(snapshot.five_hour_utilization, 100)
+        self.assertEqual(snapshot.five_hour_reset_ts, reset_ts)
+        self.assertEqual(snapshot.five_hour_status, "rejected")
+        self.assertEqual(snapshot.weekly_utilization, 29)
+        self.assertEqual(snapshot.weekly_reset_ts, weekly_reset_ts)
 
     def test_save_state_retries_transient_replace_permission_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

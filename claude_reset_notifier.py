@@ -236,7 +236,15 @@ async def poll_api(token: str) -> UsageSnapshot | None:
         raise AuthError(response.status_code)
     if response.status_code >= 400:
         log(f"API HTTP {response.status_code}: {response.text[:200]}")
-        return None
+        has_usage_headers = any(
+            response.headers.get(header)
+            for header in (
+                "anthropic-ratelimit-unified-5h-reset",
+                "anthropic-ratelimit-unified-7d-reset",
+            )
+        )
+        if response.status_code != 429 or not has_usage_headers:
+            return None
 
     return UsageSnapshot(
         five_hour_utilization=parse_percent(
