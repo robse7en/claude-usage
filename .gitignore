@@ -1,0 +1,14 @@
+.venv/
+.uv-cache/
+.uv-python/
+build/
+dist/
+*.spec
+.empty-claude-config/
+.test-localappdata*/
+.playwright-mcp/
+config.json
+*.log
+__pycache__/
+state.json
+.serena

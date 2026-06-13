@@ -1,0 +1,195 @@
+import os
+import tempfile
+import unittest
+import json
+import datetime as dt
+from pathlib import Path
+from unittest import mock
+
+os.environ["LOCALAPPDATA"] = str(Path.cwd() / ".test-localappdata")
+
+import claude_reset_notifier
+import tray_windows
+
+
+class TrayPackagingTests(unittest.TestCase):
+    def test_module_entrypoint_calls_dispatch_main(self) -> None:
+        source = Path(__file__).with_name("tray_windows.py").read_text(encoding="utf-8")
+        self.assertIn('if __name__ == "__main__":\n    main()', source)
+
+    def test_frozen_autostart_uses_executable(self) -> None:
+        exe = r"C:\Tools\ClaudeUsage.exe"
+        with mock.patch.object(tray_windows.sys, "executable", exe), mock.patch(
+            "tray_windows.is_frozen", return_value=True
+        ):
+            self.assertEqual(tray_windows.autostart_command(), f'"{exe}"')
+
+    def test_frozen_daemon_command_reuses_executable(self) -> None:
+        exe = r"C:\Tools\ClaudeUsage.exe"
+        with mock.patch.object(tray_windows.sys, "executable", exe), mock.patch(
+            "tray_windows.is_frozen", return_value=True
+        ):
+            self.assertEqual(tray_windows.notifier_command_args("--daemon"), [exe, "--daemon"])
+
+    def test_source_daemon_command_uses_pythonw_and_script(self) -> None:
+        with mock.patch("tray_windows.is_frozen", return_value=False), mock.patch(
+            "tray_windows.pythonw_path", return_value=r"C:\Python\pythonw.exe"
+        ):
+            self.assertEqual(
+                tray_windows.notifier_command_args("--test-pushover"),
+                [
+                    r"C:\Python\pythonw.exe",
+                    str(tray_windows.SCRIPT_DIR / "claude_reset_notifier.py"),
+                    "--test-pushover",
+                ],
+            )
+
+    def test_load_pushover_config_returns_defaults_when_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(tray_windows.os.environ, {"LOCALAPPDATA": tmp}):
+                self.assertEqual(
+                    tray_windows.load_pushover_config(),
+                    {
+                        "pushover_app_token": "",
+                        "pushover_user_key": "",
+                        "pushover_device": "",
+                        "pushover_sound": "",
+                        "poll_interval_seconds": 60,
+                    },
+                )
+
+    def test_save_pushover_config_writes_local_app_data_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(tray_windows.os.environ, {"LOCALAPPDATA": tmp}):
+                tray_windows.save_pushover_config(
+                    {
+                        "pushover_app_token": "app",
+                        "pushover_user_key": "user",
+                        "pushover_device": "phone",
+                        "pushover_sound": "pushover",
+                        "poll_interval_seconds": "120",
+                    }
+                )
+
+                path = Path(tmp) / "ClaudeUsage" / "config.json"
+                self.assertEqual(
+                    json.loads(path.read_text(encoding="utf-8")),
+                    {
+                        "pushover_app_token": "app",
+                        "pushover_user_key": "user",
+                        "pushover_device": "phone",
+                        "pushover_sound": "pushover",
+                        "poll_interval_seconds": 120,
+                    },
+                )
+
+    def test_save_pushover_config_clamps_invalid_poll_interval(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(tray_windows.os.environ, {"LOCALAPPDATA": tmp}):
+                tray_windows.save_pushover_config({"poll_interval_seconds": "bad"})
+
+                config = json.loads((Path(tmp) / "ClaudeUsage" / "config.json").read_text())
+                self.assertEqual(config["poll_interval_seconds"], 60)
+
+    def test_apply_pushover_settings_restarts_running_daemon(self) -> None:
+        controller = mock.Mock()
+        controller.is_running.return_value = True
+        with mock.patch("tray_windows.save_pushover_config") as save_config:
+            tray_windows.apply_pushover_settings({"pushover_app_token": "app"}, controller)
+
+        save_config.assert_called_once_with({"pushover_app_token": "app"})
+        controller.stop.assert_called_once_with()
+        controller.start.assert_called_once_with()
+
+    def test_apply_pushover_settings_does_not_start_stopped_daemon(self) -> None:
+        controller = mock.Mock()
+        controller.is_running.return_value = False
+        with mock.patch("tray_windows.save_pushover_config"):
+            tray_windows.apply_pushover_settings({"pushover_app_token": "app"}, controller)
+
+        controller.stop.assert_not_called()
+        controller.start.assert_not_called()
+
+    def test_runtime_status_uses_connected_wording(self) -> None:
+        with mock.patch("tray_windows.time.time", return_value=1000):
+            self.assertEqual(
+                tray_windows.runtime_status(
+                    {"runtime": {"status": "running", "updated_at": 999, "last_poll_at_local": "Today 2:30 AM"}},
+                    True,
+                ),
+                ("running", "Connected - last poll Today 2:30 AM"),
+            )
+
+    def test_runtime_status_waiting_uses_connected_wording(self) -> None:
+        self.assertEqual(
+            tray_windows.runtime_status({}, True),
+            ("running", "Connected - waiting for first status"),
+        )
+
+    def test_build_icons_uses_pixel_creature_with_status_badge(self) -> None:
+        icons = tray_windows.build_icons()
+        running = icons["running"]
+
+        self.assertEqual(running.size, (64, 64))
+        self.assertEqual(running.mode, "RGBA")
+        self.assertEqual(running.getpixel((30, 28))[:3], (211, 132, 107))
+        self.assertEqual(running.getpixel((52, 52))[:3], (32, 160, 96))
+
+
+class NotifierPackagingTests(unittest.TestCase):
+    def test_config_candidates_prefer_env_override(self) -> None:
+        with mock.patch.dict(
+            claude_reset_notifier.os.environ,
+            {"CLAUDE_RESET_NOTIFIER_CONFIG": r"C:\Config\custom.json"},
+        ):
+            self.assertEqual(
+                claude_reset_notifier.config_candidates(),
+                [Path(r"C:\Config\custom.json")],
+            )
+
+    def test_frozen_config_candidates_include_app_data_and_exe_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            exe = tmp_path / "dist" / "ClaudeUsage.exe"
+            local_app_data = tmp_path / "local"
+            with mock.patch.object(claude_reset_notifier.sys, "executable", str(exe)), mock.patch(
+                "claude_reset_notifier.is_frozen", return_value=True
+            ), mock.patch.dict(
+                claude_reset_notifier.os.environ,
+                {"LOCALAPPDATA": str(local_app_data)},
+                clear=False,
+            ):
+                self.assertEqual(
+                    claude_reset_notifier.config_candidates()[:2],
+                    [
+                        local_app_data / "ClaudeUsage" / "config.json",
+                        exe.parent / "config.json",
+                    ],
+                )
+
+    def test_format_display_time_uses_today_for_current_date(self) -> None:
+        now = dt.datetime(2026, 6, 13, 22, 0)
+        value = dt.datetime(2026, 6, 13, 2, 30)
+        self.assertEqual(
+            claude_reset_notifier.format_display_time(value.timestamp(), now=now),
+            "Today 2:30 AM",
+        )
+
+    def test_format_display_time_uses_weekday_for_near_future_date(self) -> None:
+        now = dt.datetime(2026, 6, 13, 22, 0)
+        value = dt.datetime(2026, 6, 16, 19, 0)
+        self.assertEqual(
+            claude_reset_notifier.format_display_time(value.timestamp(), now=now),
+            "Tue 7:00 PM",
+        )
+
+    def test_format_log_time_omits_timezone_name(self) -> None:
+        value = dt.datetime(2026, 6, 14, 2, 30)
+        self.assertEqual(
+            claude_reset_notifier.format_log_time(value.timestamp()),
+            "2026-06-14 02:30",
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

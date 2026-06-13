@@ -1,0 +1,7 @@
+{
+  "pushover_app_token": "your-pushover-application-api-token",
+  "pushover_user_key": "your-pushover-user-or-group-key",
+  "pushover_device": "",
+  "pushover_sound": "",
+  "poll_interval_seconds": 60
+}
