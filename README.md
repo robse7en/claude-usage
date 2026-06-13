@@ -1,4 +1,4 @@
-# Claude usage
+# Claude usage + reset notifier
 
 Small Windows tray notifier for Claude Code usage reset events.
 
