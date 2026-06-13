@@ -30,7 +30,7 @@ DEFAULT_PUSHOVER_CONFIG = {
     "pushover_user_key": "",
     "pushover_device": "",
     "pushover_sound": "",
-    "poll_interval_seconds": 60,
+    "safety_refresh_seconds": 15 * 60,
 }
 
 
@@ -64,10 +64,15 @@ def normalize_pushover_config(config: dict[str, Any]) -> dict[str, Any]:
         normalized[key] = str(value).strip() if value is not None else ""
 
     try:
-        poll_interval = int(config.get("poll_interval_seconds", DEFAULT_PUSHOVER_CONFIG["poll_interval_seconds"]))
+        safety_refresh = int(
+            config.get(
+                "safety_refresh_seconds",
+                DEFAULT_PUSHOVER_CONFIG["safety_refresh_seconds"],
+            )
+        )
     except (TypeError, ValueError):
-        poll_interval = DEFAULT_PUSHOVER_CONFIG["poll_interval_seconds"]
-    normalized["poll_interval_seconds"] = max(1, poll_interval)
+        safety_refresh = DEFAULT_PUSHOVER_CONFIG["safety_refresh_seconds"]
+    normalized["safety_refresh_seconds"] = max(1, safety_refresh)
     return normalized
 
 
@@ -371,7 +376,7 @@ def open_pushover_settings(controller: DaemonController) -> None:
         ("Pushover user/group key", "pushover_user_key", True),
         ("Device name", "pushover_device", False),
         ("Sound", "pushover_sound", False),
-        ("Poll interval seconds", "poll_interval_seconds", False),
+        ("Safety refresh seconds", "safety_refresh_seconds", False),
     ]
     entries: dict[str, tk.Entry] = {}
 

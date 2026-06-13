@@ -13,7 +13,9 @@ headers.
 
 The daemon sends one Pushover message when the previously observed reset time
 is reached. It initializes silently on first run so it does not send stale
-messages.
+messages. After each poll it schedules the next check for the nearest observed
+reset timestamp, with a periodic safety refresh in case Claude changes reset
+times while the daemon is waiting.
 
 The tray app monitors and controls the daemon. It shows:
 

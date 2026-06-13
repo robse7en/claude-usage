@@ -28,7 +28,7 @@ import httpx  # noqa: E402
 
 
 APP_NAME = "ClaudeUsage"
-POLL_INTERVAL = 60
+SAFETY_REFRESH_INTERVAL = 15 * 60
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
@@ -135,15 +135,17 @@ def load_config() -> dict[str, Any]:
         "PUSHOVER_USER_KEY": "pushover_user_key",
         "PUSHOVER_DEVICE": "pushover_device",
         "PUSHOVER_SOUND": "pushover_sound",
-        "CLAUDE_USAGE_POLL_SECONDS": "poll_interval_seconds",
-        "CLAUDE_RESET_POLL_SECONDS": "poll_interval_seconds",
+        "CLAUDE_USAGE_SAFETY_REFRESH_SECONDS": "safety_refresh_seconds",
+        "CLAUDE_RESET_SAFETY_REFRESH_SECONDS": "safety_refresh_seconds",
+        "CLAUDE_USAGE_POLL_SECONDS": "safety_refresh_seconds",
+        "CLAUDE_RESET_POLL_SECONDS": "safety_refresh_seconds",
     }
     for env_name, key in env_map.items():
         value = os.environ.get(env_name)
         if value:
             config[key] = value
 
-    config.setdefault("poll_interval_seconds", POLL_INTERVAL)
+    config.setdefault("safety_refresh_seconds", SAFETY_REFRESH_INTERVAL)
     return config
 
 
@@ -523,6 +525,26 @@ async def run_once(config: dict[str, Any], state: dict[str, Any]) -> bool:
     return True
 
 
+def next_poll_delay(
+    state: dict[str, Any],
+    *,
+    now: float | None = None,
+    safety_refresh_seconds: int = SAFETY_REFRESH_INTERVAL,
+) -> float:
+    current_time = time.time() if now is None else now
+    safety_delay = max(1.0, float(safety_refresh_seconds))
+    reset_delays: list[float] = []
+
+    for bucket in ("five_hour", "weekly"):
+        reset_ts = float(bucket_state(state, bucket).get("reset_ts") or 0)
+        if reset_ts > current_time:
+            reset_delays.append(reset_ts - current_time)
+
+    if not reset_delays:
+        return safety_delay
+    return max(0.0, min(safety_delay, min(reset_delays)))
+
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description="Claude usage Pushover notifier")
     parser.add_argument("--once", action="store_true", help="poll once and exit")
@@ -549,7 +571,9 @@ async def main() -> None:
         ok = await run_once(config, state)
         sys.exit(0 if ok else 1)
 
-    poll_interval = int(config.get("poll_interval_seconds") or POLL_INTERVAL)
+    safety_refresh_seconds = int(
+        config.get("safety_refresh_seconds") or SAFETY_REFRESH_INTERVAL
+    )
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
 
@@ -567,11 +591,14 @@ async def main() -> None:
                 pass
 
     log("=== Claude usage notifier started ===")
-    log(f"Poll interval: {poll_interval}s")
+    log(f"Safety refresh interval: {safety_refresh_seconds}s")
     update_runtime(state, "running", "Started")
     while not stop_event.is_set():
         await run_once(config, state)
-        deadline = time.time() + poll_interval
+        deadline = time.time() + next_poll_delay(
+            state,
+            safety_refresh_seconds=safety_refresh_seconds,
+        )
         while not stop_event.is_set() and time.time() < deadline:
             if read_command() == "poll_now":
                 log("Poll requested by tray")

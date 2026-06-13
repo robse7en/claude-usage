@@ -55,7 +55,7 @@ class TrayPackagingTests(unittest.TestCase):
                         "pushover_user_key": "",
                         "pushover_device": "",
                         "pushover_sound": "",
-                        "poll_interval_seconds": 60,
+                        "safety_refresh_seconds": 900,
                     },
                 )
 
@@ -68,7 +68,7 @@ class TrayPackagingTests(unittest.TestCase):
                         "pushover_user_key": "user",
                         "pushover_device": "phone",
                         "pushover_sound": "pushover",
-                        "poll_interval_seconds": "120",
+                        "safety_refresh_seconds": "120",
                     }
                 )
 
@@ -80,17 +80,17 @@ class TrayPackagingTests(unittest.TestCase):
                         "pushover_user_key": "user",
                         "pushover_device": "phone",
                         "pushover_sound": "pushover",
-                        "poll_interval_seconds": 120,
+                        "safety_refresh_seconds": 120,
                     },
                 )
 
-    def test_save_pushover_config_clamps_invalid_poll_interval(self) -> None:
+    def test_save_pushover_config_clamps_invalid_safety_refresh(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(tray_windows.os.environ, {"LOCALAPPDATA": tmp}):
-                tray_windows.save_pushover_config({"poll_interval_seconds": "bad"})
+                tray_windows.save_pushover_config({"safety_refresh_seconds": "bad"})
 
                 config = json.loads((Path(tmp) / "ClaudeUsage" / "config.json").read_text())
-                self.assertEqual(config["poll_interval_seconds"], 60)
+                self.assertEqual(config["safety_refresh_seconds"], 900)
 
     def test_apply_pushover_settings_restarts_running_daemon(self) -> None:
         controller = mock.Mock()
@@ -226,6 +226,36 @@ class NotifierPackagingTests(unittest.TestCase):
         self.assertEqual(snapshot.five_hour_status, "rejected")
         self.assertEqual(snapshot.weekly_utilization, 29)
         self.assertEqual(snapshot.weekly_reset_ts, weekly_reset_ts)
+
+    def test_next_poll_delay_uses_nearest_reset_before_safety_refresh(self) -> None:
+        state = {
+            "five_hour": {"reset_ts": 1_700_000_120.0},
+            "weekly": {"reset_ts": 1_700_003_600.0},
+        }
+
+        self.assertEqual(
+            claude_reset_notifier.next_poll_delay(
+                state,
+                now=1_700_000_000.0,
+                safety_refresh_seconds=900,
+            ),
+            120.0,
+        )
+
+    def test_next_poll_delay_uses_safety_refresh_when_resets_are_later(self) -> None:
+        state = {
+            "five_hour": {"reset_ts": 1_700_003_600.0},
+            "weekly": {"reset_ts": 1_700_007_200.0},
+        }
+
+        self.assertEqual(
+            claude_reset_notifier.next_poll_delay(
+                state,
+                now=1_700_000_000.0,
+                safety_refresh_seconds=900,
+            ),
+            900.0,
+        )
 
     def test_save_state_retries_transient_replace_permission_error(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
