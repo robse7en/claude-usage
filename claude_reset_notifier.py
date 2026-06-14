@@ -599,10 +599,21 @@ async def main() -> None:
             state,
             safety_refresh_seconds=safety_refresh_seconds,
         )
+        last_heartbeat = time.time()
         while not stop_event.is_set() and time.time() < deadline:
             if read_command() == "poll_now":
                 log("Poll requested by tray")
                 break
+            now = time.time()
+            if now - last_heartbeat >= 90:
+                rt = runtime_state(state)
+                update_runtime(
+                    state,
+                    str(rt.get("status") or "running"),
+                    str(rt.get("message") or ""),
+                    str(rt.get("error") or ""),
+                )
+                last_heartbeat = now
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=1.0)
             except asyncio.TimeoutError:
