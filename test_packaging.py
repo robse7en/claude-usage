@@ -18,6 +18,11 @@ class TrayPackagingTests(unittest.TestCase):
         source = Path(__file__).with_name("tray_windows.py").read_text(encoding="utf-8")
         self.assertIn('if __name__ == "__main__":\n    main()', source)
 
+    def test_build_includes_auth_relaunch_helper_script(self) -> None:
+        source = Path(__file__).with_name("build-windows.ps1").read_text(encoding="utf-8")
+        self.assertIn("run-claude-minimized.ps1", source)
+        self.assertIn("--add-data", source)
+
     def test_frozen_autostart_uses_executable(self) -> None:
         exe = r"C:\Tools\ClaudeUsage.exe"
         with mock.patch.object(tray_windows.sys, "executable", exe), mock.patch(
@@ -167,6 +172,133 @@ class NotifierPackagingTests(unittest.TestCase):
                         exe.parent / "config.json",
                     ],
                 )
+
+    def test_auth_relaunch_script_candidates_include_exe_dir_and_meipass_when_frozen(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            exe = tmp_path / "dist" / "ClaudeUsage.exe"
+            meipass = tmp_path / "bundle"
+            with mock.patch.object(claude_reset_notifier.sys, "executable", str(exe)), mock.patch(
+                "claude_reset_notifier.is_frozen", return_value=True
+            ), mock.patch.object(claude_reset_notifier.sys, "_MEIPASS", str(meipass), create=True):
+                self.assertEqual(
+                    claude_reset_notifier.auth_relaunch_script_candidates(),
+                    [
+                        exe.parent / "run-claude-minimized.ps1",
+                        meipass / "run-claude-minimized.ps1",
+                    ],
+                )
+
+    def test_maybe_launch_auth_relaunch_skips_missing_script_without_crashing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state: dict[str, object] = {}
+            with mock.patch(
+                "claude_reset_notifier.auth_relaunch_script_candidates",
+                return_value=[Path(tmp) / "missing.ps1"],
+            ), mock.patch("claude_reset_notifier.subprocess.Popen") as popen:
+                self.assertFalse(
+                    claude_reset_notifier.maybe_launch_auth_relaunch(
+                        state,
+                        "No Claude token found",
+                    )
+                )
+
+            popen.assert_not_called()
+            self.assertTrue(state["runtime"]["auth_relaunch_attempted"])
+
+    def test_maybe_launch_auth_relaunch_starts_existing_script_with_powershell(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "run-claude-minimized.ps1"
+            script.write_text("", encoding="utf-8")
+            state: dict[str, object] = {}
+            with mock.patch(
+                "claude_reset_notifier.auth_relaunch_script_candidates",
+                return_value=[script],
+            ), mock.patch("claude_reset_notifier.subprocess.Popen") as popen:
+                self.assertTrue(
+                    claude_reset_notifier.maybe_launch_auth_relaunch(
+                        state,
+                        "No Claude token found",
+                    )
+                )
+
+            popen.assert_called_once_with(
+                [
+                    "powershell.exe",
+                    "-NoLogo",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    str(script),
+                ],
+                cwd=str(script.parent),
+                stdin=claude_reset_notifier.subprocess.DEVNULL,
+                stdout=claude_reset_notifier.subprocess.DEVNULL,
+                stderr=claude_reset_notifier.subprocess.DEVNULL,
+                creationflags=getattr(claude_reset_notifier.subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            self.assertTrue(state["runtime"]["auth_relaunch_attempted"])
+
+    def test_maybe_launch_auth_relaunch_skips_when_already_attempted(self) -> None:
+        state: dict[str, object] = {"runtime": {"auth_relaunch_attempted": True}}
+        with mock.patch("claude_reset_notifier.subprocess.Popen") as popen:
+            self.assertFalse(
+                claude_reset_notifier.maybe_launch_auth_relaunch(
+                    state,
+                    "Claude token rejected",
+                )
+            )
+
+        popen.assert_not_called()
+
+    def test_run_once_launches_auth_relaunch_once_when_token_missing(self) -> None:
+        state: dict[str, object] = {}
+        with mock.patch("claude_reset_notifier.read_token", return_value=None), mock.patch(
+            "claude_reset_notifier.maybe_launch_auth_relaunch",
+            return_value=True,
+        ) as launch:
+            self.assertFalse(asyncio.run(claude_reset_notifier.run_once({}, state)))
+
+        launch.assert_called_once_with(state, "No Claude token found")
+
+    def test_run_once_launches_auth_relaunch_once_when_token_rejected(self) -> None:
+        async def rejected(_token: str):
+            raise claude_reset_notifier.AuthError(401)
+
+        state: dict[str, object] = {}
+        with mock.patch("claude_reset_notifier.read_token", return_value="token"), mock.patch(
+            "claude_reset_notifier.poll_api",
+            rejected,
+        ), mock.patch("claude_reset_notifier.maybe_launch_auth_relaunch", return_value=True) as launch:
+            self.assertFalse(asyncio.run(claude_reset_notifier.run_once({}, state)))
+
+        launch.assert_called_once_with(state, "Claude token rejected")
+
+    def test_run_once_does_not_launch_auth_relaunch_for_generic_poll_failure(self) -> None:
+        async def failed(_token: str):
+            return None
+
+        state: dict[str, object] = {}
+        with mock.patch("claude_reset_notifier.read_token", return_value="token"), mock.patch(
+            "claude_reset_notifier.poll_api",
+            failed,
+        ), mock.patch("claude_reset_notifier.maybe_launch_auth_relaunch") as launch:
+            self.assertFalse(asyncio.run(claude_reset_notifier.run_once({}, state)))
+
+        launch.assert_not_called()
+
+    def test_run_once_clears_auth_relaunch_guard_after_successful_poll(self) -> None:
+        async def successful(_token: str):
+            return claude_reset_notifier.UsageSnapshot(0, 0.0, "allowed", 0, 0.0)
+
+        state: dict[str, object] = {"runtime": {"auth_relaunch_attempted": True}}
+        with mock.patch("claude_reset_notifier.read_token", return_value="token"), mock.patch(
+            "claude_reset_notifier.poll_api",
+            successful,
+        ), mock.patch("claude_reset_notifier.send_pushover", return_value=False):
+            self.assertTrue(asyncio.run(claude_reset_notifier.run_once({}, state)))
+
+        self.assertNotIn("auth_relaunch_attempted", state["runtime"])
 
     def test_format_display_time_uses_today_for_current_date(self) -> None:
         now = dt.datetime(2026, 6, 13, 22, 0)

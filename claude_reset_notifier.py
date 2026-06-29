@@ -12,6 +12,7 @@ import logging.handlers
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ import httpx  # noqa: E402
 
 APP_NAME = "ClaudeUsage"
 SAFETY_REFRESH_INTERVAL = 15 * 60
+AUTH_RELAUNCH_SCRIPT = "run-claude-minimized.ps1"
 API_URL = "https://api.anthropic.com/v1/messages"
 API_HEADERS_TEMPLATE = {
     "anthropic-version": "2023-06-01",
@@ -111,6 +113,20 @@ def app_dir() -> Path:
     if is_frozen():
         return Path(sys.executable).resolve().parent
     return SCRIPT_DIR
+
+
+def auth_relaunch_script_candidates() -> list[Path]:
+    candidates = [app_dir() / AUTH_RELAUNCH_SCRIPT]
+    meipass = getattr(sys, "_MEIPASS", "")
+    if meipass:
+        bundled = Path(meipass) / AUTH_RELAUNCH_SCRIPT
+        if bundled not in candidates:
+            candidates.append(bundled)
+    return candidates
+
+
+def auth_relaunch_script_path() -> Path | None:
+    return next((path for path in auth_relaunch_script_candidates() if path.exists()), None)
 
 
 def config_candidates() -> list[Path]:
@@ -331,6 +347,49 @@ def update_runtime(
     save_state(state)
 
 
+def maybe_launch_auth_relaunch(state: dict[str, Any], reason: str) -> bool:
+    runtime = runtime_state(state)
+    if runtime.get("auth_relaunch_attempted"):
+        log(f"Claude auth relaunch already attempted; skipping ({reason})")
+        return False
+
+    runtime["auth_relaunch_attempted"] = True
+    runtime["auth_relaunch_attempted_at"] = time.time()
+    runtime["auth_relaunch_reason"] = reason
+    save_state(state)
+
+    script = auth_relaunch_script_path()
+    if script is None:
+        log(
+            "Claude auth relaunch helper not found; checked "
+            + ", ".join(str(path) for path in auth_relaunch_script_candidates())
+        )
+        return False
+
+    try:
+        subprocess.Popen(
+            [
+                "powershell.exe",
+                "-NoLogo",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(script),
+            ],
+            cwd=str(script.parent),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except OSError as exc:
+        log(f"Failed to launch Claude auth helper {script}: {exc}")
+        return False
+
+    log(f"Launched Claude auth helper: {script}")
+    return True
+
+
 def read_command() -> str | None:
     path = command_path()
     try:
@@ -471,6 +530,7 @@ async def run_once(config: dict[str, Any], state: dict[str, Any]) -> bool:
     if not token:
         log("No Claude token found; run `claude login` and retry")
         update_runtime(state, "unauthenticated", "Run `claude login`", "No Claude token found")
+        maybe_launch_auth_relaunch(state, "No Claude token found")
         return False
 
     try:
@@ -483,6 +543,7 @@ async def run_once(config: dict[str, Any], state: dict[str, Any]) -> bool:
             "Run `claude login`",
             "Claude token rejected",
         )
+        maybe_launch_auth_relaunch(state, "Claude token rejected")
         return False
 
     if snapshot is None:
@@ -508,6 +569,9 @@ async def run_once(config: dict[str, Any], state: dict[str, Any]) -> bool:
         "allowed",
     )
     runtime = runtime_state(state)
+    runtime.pop("auth_relaunch_attempted", None)
+    runtime.pop("auth_relaunch_attempted_at", None)
+    runtime.pop("auth_relaunch_reason", None)
     runtime["last_poll_at"] = time.time()
     runtime["last_poll_at_local"] = format_time(time.time())
     runtime["last_error"] = ""

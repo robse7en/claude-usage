@@ -88,6 +88,7 @@ Log "Building single-file executable..."
     --onefile `
     --noconsole `
     --name ClaudeUsage `
+    --add-data "$(Join-Path $Root "run-claude-minimized.ps1");." `
     --hidden-import pystray._win32 `
     --collect-submodules PIL `
     (Join-Path $Root "tray_windows.py")
